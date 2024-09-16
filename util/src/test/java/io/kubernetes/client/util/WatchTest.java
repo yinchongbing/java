@@ -1,9 +1,9 @@
 /*
-Copyright 2019 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -12,26 +12,24 @@ limitations under the License.
 */
 package io.kubernetes.client.util;
 
-import static org.junit.Assert.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
-import io.kubernetes.client.JSON;
-import io.kubernetes.client.models.V1ConfigMap;
+import io.kubernetes.client.openapi.JSON;
+import io.kubernetes.client.openapi.models.V1ConfigMap;
 import java.io.IOException;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 /** Tests for the Watch helper class */
-public class WatchTest {
+class WatchTest {
   @Test
-  public void testWatchEnd() throws IOException {
+  void watchEnd() throws IOException {
     JSON json = new JSON();
     Watch<V1ConfigMap> watch =
         new Watch<V1ConfigMap>(
             json, null, new TypeToken<Watch.Response<V1ConfigMap>>() {}.getType(), null);
     JsonObject metadata = new JsonObject();
-    metadata.addProperty("name", "foo");
-    metadata.addProperty("namespace", "bar");
 
     JsonObject status = new JsonObject();
     status.add("metadata", metadata);
@@ -47,6 +45,6 @@ public class WatchTest {
     obj.add("object", status);
     String data = json.getGson().toJson(obj);
     Watch.Response<V1ConfigMap> response = watch.parseLine(data);
-    assertEquals(null, response.object);
+    assertThat(response.object).isEqualTo(null);
   }
 }

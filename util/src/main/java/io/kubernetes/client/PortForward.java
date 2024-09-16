@@ -1,19 +1,22 @@
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package io.kubernetes.client;
 
-import io.kubernetes.client.models.V1Pod;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.Configuration;
+import io.kubernetes.client.openapi.Pair;
+import io.kubernetes.client.openapi.models.V1Pod;
 import io.kubernetes.client.util.WebSocketStreamHandler;
 import io.kubernetes.client.util.WebSockets;
 import java.io.IOException;
@@ -28,14 +31,15 @@ import java.util.List;
  * API (which the Go client uses)
  *
  * <p>The protocol is undocumented as far as I can tell, but the PR that added it is here:
- * https://github.com/kubernetes/kubernetes/pull/33684
+ * github.com/kubernetes/kubernetes/pull/33684
  *
  * <p>And the protocol is:
  *
- * <p>ws://server/api/v1/namespaces/<namespace>/pods/<pod>/portforward?ports=80&ports=8080
+ * <p>web sockets on server/api/v1/namespaces/&lt;namespace&gt;/pods/&lt;pod&gt;/portforward with
+ * args ports=80 and ports=8080
  *
  * <p>I/O for first port (80) is on Channel 0 Err for first port (80) is on Channel 1 I/O for second
- * port (8080) is on Channel 2 Err for second port (8080) is on Channel 3 <and so on for remaining
+ * port (8080) is on Channel 2 Err for second port (8080) is on Channel 3 < and so on for remaining
  * ports>
  *
  * <p>The first two bytes of each output stream is the port that is being forwarded in little-endian
@@ -105,12 +109,20 @@ public class PortForward {
     String path = makePath(namespace, name);
     WebSocketStreamHandler handler = new WebSocketStreamHandler();
     PortForwardResult result = new PortForwardResult(handler, ports);
-    List<Pair> queryParams = new ArrayList<>();
+    List<Pair> queryParams = new ArrayList<>(ports.size());
     for (Integer port : ports) {
       queryParams.add(new Pair("ports", port.toString()));
     }
     WebSockets.stream(path, "GET", queryParams, apiClient, handler);
-
+    try {
+      handler.waitForInitialized();
+    } catch (InterruptedException ex) {
+      throw new ApiException(ex);
+    }
+    Throwable err = handler.getError();
+    if (err != null) {
+      throw new ApiException(err);
+    }
     // Wait for streams to start.
     result.init();
 
@@ -144,7 +156,10 @@ public class PortForward {
       for (int i = 0; i < ports.size(); i++) {
         InputStream is = handler.getInputStream(i * 2);
         byte[] data = new byte[2];
-        is.read(data);
+        int readAmount = is.read(data);
+        if (readAmount != 2) {
+          throw new IOException("Failed to read port");
+        }
         int port = (data[0] & 0xFF) + (data[1] & 0xFF) * 256;
         streams.put(port, i);
       }
@@ -178,12 +193,12 @@ public class PortForward {
      * @param port The port number to get the stream for.
      * @return The error stream, or null if there is no such port.
      */
-    public OutputStream getErrorStream(int port) {
+    public InputStream getErrorStream(int port) {
       int portIndex = findPortIndex(port);
       if (portIndex == -1) {
         return null;
       }
-      return handler.getOutputStream(portIndex * 2 + 1);
+      return handler.getInputStream(portIndex * 2 + 1);
     }
 
     /**

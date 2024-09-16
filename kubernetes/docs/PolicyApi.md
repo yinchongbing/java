@@ -1,15 +1,15 @@
 # PolicyApi
 
-All URIs are relative to *https://localhost*
+All URIs are relative to *http://localhost*
 
-Method | HTTP request | Description
-------------- | ------------- | -------------
-[**getAPIGroup**](PolicyApi.md#getAPIGroup) | **GET** /apis/policy/ | 
+| Method | HTTP request | Description |
+|------------- | ------------- | -------------|
+| [**getAPIGroup**](PolicyApi.md#getAPIGroup) | **GET** /apis/policy/ |  |
 
 
-<a name="getAPIGroup"></a>
+<a id="getAPIGroup"></a>
 # **getAPIGroup**
-> V1APIGroup getAPIGroup()
+> V1APIGroup getAPIGroup().execute();
 
 
 
@@ -18,27 +18,37 @@ get information of a group
 ### Example
 ```java
 // Import classes:
-//import io.kubernetes.client.ApiClient;
-//import io.kubernetes.client.ApiException;
-//import io.kubernetes.client.Configuration;
-//import io.kubernetes.client.auth.*;
-//import io.kubernetes.client.apis.PolicyApi;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.Configuration;
+import io.kubernetes.client.openapi.auth.*;
+import io.kubernetes.client.openapi.models.*;
+import io.kubernetes.client.openapi.apis.PolicyApi;
 
-ApiClient defaultClient = Configuration.getDefaultApiClient();
+public class Example {
+  public static void main(String[] args) {
+    ApiClient defaultClient = Configuration.getDefaultApiClient();
+    defaultClient.setBasePath("http://localhost");
+    
+    // Configure API key authorization: BearerToken
+    ApiKeyAuth BearerToken = (ApiKeyAuth) defaultClient.getAuthentication("BearerToken");
+    BearerToken.setApiKey("YOUR API KEY");
+    // Uncomment the following line to set a prefix for the API key, e.g. "Token" (defaults to null)
+    //BearerToken.setApiKeyPrefix("Token");
 
-// Configure API key authorization: BearerToken
-ApiKeyAuth BearerToken = (ApiKeyAuth) defaultClient.getAuthentication("BearerToken");
-BearerToken.setApiKey("YOUR API KEY");
-// Uncomment the following line to set a prefix for the API key, e.g. "Token" (defaults to null)
-//BearerToken.setApiKeyPrefix("Token");
-
-PolicyApi apiInstance = new PolicyApi();
-try {
-    V1APIGroup result = apiInstance.getAPIGroup();
-    System.out.println(result);
-} catch (ApiException e) {
-    System.err.println("Exception when calling PolicyApi#getAPIGroup");
-    e.printStackTrace();
+    PolicyApi apiInstance = new PolicyApi(defaultClient);
+    try {
+      V1APIGroup result = apiInstance.getAPIGroup()
+            .execute();
+      System.out.println(result);
+    } catch (ApiException e) {
+      System.err.println("Exception when calling PolicyApi#getAPIGroup");
+      System.err.println("Status code: " + e.getCode());
+      System.err.println("Reason: " + e.getResponseBody());
+      System.err.println("Response headers: " + e.getResponseHeaders());
+      e.printStackTrace();
+    }
+  }
 }
 ```
 
@@ -55,6 +65,12 @@ This endpoint does not need any parameter.
 
 ### HTTP request headers
 
- - **Content-Type**: application/json, application/yaml, application/vnd.kubernetes.protobuf
+ - **Content-Type**: Not defined
  - **Accept**: application/json, application/yaml, application/vnd.kubernetes.protobuf
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | OK |  -  |
+| **401** | Unauthorized |  -  |
 

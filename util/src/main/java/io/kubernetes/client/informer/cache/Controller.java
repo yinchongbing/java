@@ -1,10 +1,29 @@
+/*
+Copyright 2020 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package io.kubernetes.client.informer.cache;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import io.kubernetes.client.common.KubernetesListObject;
+import io.kubernetes.client.common.KubernetesObject;
 import io.kubernetes.client.informer.ListerWatcher;
 import io.kubernetes.client.informer.ResyncRunnable;
+import io.kubernetes.client.util.Threads;
 import java.util.Deque;
-import java.util.concurrent.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.apache.commons.lang3.tuple.MutablePair;
@@ -15,7 +34,8 @@ import org.slf4j.LoggerFactory;
  * Controller is a java port of k/client-go's informer#Controller. It plumbs reflector and the queue
  * implementation and it runs re-sync function periodically.
  */
-public class Controller<ApiType, ApiListType> {
+public class Controller<
+    ApiType extends KubernetesObject, ApiListType extends KubernetesListObject> {
 
   private static final Logger log = LoggerFactory.getLogger(Controller.class);
 
@@ -25,7 +45,7 @@ public class Controller<ApiType, ApiListType> {
   private long fullResyncPeriod;
 
   /** Queue stores deltas produced by reflector */
-  private DeltaFIFO<ApiType> queue;
+  private DeltaFIFO queue;
 
   private ListerWatcher<ApiType, ApiListType> listerWatcher;
 
@@ -34,7 +54,7 @@ public class Controller<ApiType, ApiListType> {
   private Supplier<Boolean> resyncFunc;
 
   /** how we actually process items from the queue */
-  private Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, Object>>> processFunc;
+  private Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, KubernetesObject>>> processFunc;
 
   private ScheduledExecutorService reflectExecutor;
 
@@ -46,40 +66,51 @@ public class Controller<ApiType, ApiListType> {
 
   private ScheduledFuture reflectorFuture;
 
+  /* visible for testing */ BiConsumer<Class<ApiType>, Throwable> exceptionHandler;
+
   public Controller(
       Class<ApiType> apiTypeClass,
-      DeltaFIFO<ApiType> queue,
+      DeltaFIFO queue,
       ListerWatcher<ApiType, ApiListType> listerWatcher,
-      Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, Object>>> processFunc,
+      Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, KubernetesObject>>> processFunc,
       Supplier<Boolean> resyncFunc,
       long fullResyncPeriod) {
+    this(apiTypeClass, queue, listerWatcher, processFunc, resyncFunc, fullResyncPeriod, null);
+  }
+
+  public Controller(
+      Class<ApiType> apiTypeClass,
+      DeltaFIFO queue,
+      ListerWatcher<ApiType, ApiListType> listerWatcher,
+      Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, KubernetesObject>>> processFunc,
+      Supplier<Boolean> resyncFunc,
+      long fullResyncPeriod,
+      BiConsumer<Class<ApiType>, Throwable> exceptionHandler) {
+
     this.queue = queue;
     this.listerWatcher = listerWatcher;
     this.apiTypeClass = apiTypeClass;
     this.processFunc = processFunc;
     this.resyncFunc = resyncFunc;
     this.fullResyncPeriod = fullResyncPeriod;
+    this.exceptionHandler = exceptionHandler;
 
     // starts one daemon thread for reflector
     this.reflectExecutor =
         Executors.newSingleThreadScheduledExecutor(
-            new ThreadFactoryBuilder()
-                .setNameFormat("controller-reflector-" + apiTypeClass.getName() + "-%d")
-                .build());
+            Threads.threadFactory("controller-reflector-" + apiTypeClass.getName() + "-%d"));
 
     // starts one daemon thread for resync
     this.resyncExecutor =
         Executors.newSingleThreadScheduledExecutor(
-            new ThreadFactoryBuilder()
-                .setNameFormat("controller-resync-" + apiTypeClass.getName() + "-%d")
-                .build());
+            Threads.threadFactory("controller-resync-" + apiTypeClass.getName() + "-%d"));
   }
 
   public Controller(
       Class<ApiType> apiTypeClass,
-      DeltaFIFO<ApiType> queue,
+      DeltaFIFO queue,
       ListerWatcher<ApiType, ApiListType> listerWatcher,
-      Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, Object>>> popProcessFunc) {
+      Consumer<Deque<MutablePair<DeltaFIFO.DeltaType, KubernetesObject>>> popProcessFunc) {
     this(apiTypeClass, queue, listerWatcher, popProcessFunc, null, 0);
   }
 
@@ -98,7 +129,7 @@ public class Controller<ApiType, ApiListType> {
 
     synchronized (this) {
       // TODO(yue9944882): proper naming for reflector
-      reflector = new ReflectorRunnable<ApiType, ApiListType>(apiTypeClass, listerWatcher, queue);
+      reflector = newReflector();
       try {
         reflectorFuture =
             reflectExecutor.scheduleWithFixedDelay(
@@ -115,6 +146,10 @@ public class Controller<ApiType, ApiListType> {
     this.processLoop();
   }
 
+  /* visible for testing */ ReflectorRunnable<ApiType, ApiListType> newReflector() {
+    return new ReflectorRunnable<>(apiTypeClass, listerWatcher, queue, exceptionHandler);
+  }
+
   /** stops the resync thread pool firstly, then stop the reflector */
   public void stop() {
     synchronized (this) {
@@ -123,7 +158,8 @@ public class Controller<ApiType, ApiListType> {
         reflectorFuture.cancel(true);
       }
     }
-    reflectExecutor.shutdown();
+    reflectExecutor.shutdownNow();
+    resyncExecutor.shutdownNow();
   }
 
   /** returns true if the queue has been resycned */
@@ -146,6 +182,9 @@ public class Controller<ApiType, ApiListType> {
         this.queue.pop(this.processFunc);
       } catch (InterruptedException t) {
         log.error("DefaultController#processLoop get interrupted {}", t.getMessage(), t);
+        return;
+      } catch (Throwable t) {
+        log.error("DefaultController#processLoop recovered from crashing {}", t.getMessage(), t);
       }
     }
   }

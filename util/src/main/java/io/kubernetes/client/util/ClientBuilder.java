@@ -1,15 +1,15 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
- */
+*/
 package io.kubernetes.client.util;
 
 import static io.kubernetes.client.util.Config.ENV_KUBECONFIG;
@@ -21,20 +21,37 @@ import static io.kubernetes.client.util.KubeConfig.ENV_HOME;
 import static io.kubernetes.client.util.KubeConfig.KUBECONFIG;
 import static io.kubernetes.client.util.KubeConfig.KUBEDIR;
 
-import com.google.common.base.Strings;
-import com.squareup.okhttp.*;
-import io.kubernetes.client.ApiClient;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.models.V1CertificateSigningRequest;
+import io.kubernetes.client.persister.FilePersister;
 import io.kubernetes.client.util.credentials.AccessTokenAuthentication;
 import io.kubernetes.client.util.credentials.Authentication;
+import io.kubernetes.client.util.credentials.ClientCertificateAuthentication;
 import io.kubernetes.client.util.credentials.KubeconfigAuthentication;
+import io.kubernetes.client.util.credentials.TokenFileAuthentication;
+import io.kubernetes.client.util.exception.CSRNotApprovedException;
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.Reader;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.security.PrivateKey;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+import okhttp3.Protocol;
+import org.apache.commons.compress.utils.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,8 +62,17 @@ public class ClientBuilder {
   private String basePath = Config.DEFAULT_FALLBACK_HOST;
   private byte[] caCertBytes = null;
   private boolean verifyingSsl = true;
-  private String overridePatchFormat;
   private Authentication authentication;
+  private String keyStorePassphrase;
+  // defaulting client protocols to HTTP1.1 and HTTP 2
+  private List<Protocol> protocols = Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1);
+  // default to unlimited read timeout
+  private Duration readTimeout = Duration.ZERO;
+  // default health check is once a minute
+  private Duration pingInterval = Duration.ofMinutes(1);
+  // time to refresh exec based credentials
+  // TODO: Read the expiration from the credential itself
+  private Duration execCredentialRefreshPeriod = null;
 
   /**
    * Creates an {@link ApiClient} by calling {@link #standard()} and {@link #build()}.
@@ -80,8 +106,25 @@ public class ClientBuilder {
 
   public static ClientBuilder standard(boolean persistConfig) throws IOException {
     final File kubeConfig = findConfigFromEnv();
+    ClientBuilder clientBuilderEnv = getClientBuilder(persistConfig, kubeConfig);
+    if (clientBuilderEnv != null) return clientBuilderEnv;
+    final File config = findConfigInHomeDir();
+    ClientBuilder clientBuilderHomeDir = getClientBuilder(persistConfig, config);
+    if (clientBuilderHomeDir != null) return clientBuilderHomeDir;
+    final File clusterCa = new File(SERVICEACCOUNT_CA_PATH);
+    if (clusterCa.exists()) {
+      return cluster();
+    }
+    return new ClientBuilder();
+  }
+
+  private static ClientBuilder getClientBuilder(boolean persistConfig, File kubeConfig)
+      throws IOException {
     if (kubeConfig != null) {
-      try (FileReader kubeConfigReader = new FileReader(kubeConfig)) { // TODO UTF-8
+      try (BufferedReader kubeConfigReader =
+          new BufferedReader(
+              new InputStreamReader(
+                  new FileInputStream(kubeConfig), StandardCharsets.UTF_8.name()))) {
         KubeConfig kc = KubeConfig.loadKubeConfig(kubeConfigReader);
         if (persistConfig) {
           kc.setPersistConfig(new FilePersister(kubeConfig));
@@ -90,22 +133,7 @@ public class ClientBuilder {
         return kubeconfig(kc);
       }
     }
-    final File config = findConfigInHomeDir();
-    if (config != null) {
-      try (FileReader configReader = new FileReader(config)) { // TODO UTF-8
-        KubeConfig kc = KubeConfig.loadKubeConfig(configReader);
-        if (persistConfig) {
-          kc.setPersistConfig(new FilePersister(config));
-        }
-        kc.setFile(kubeConfig);
-        return kubeconfig(kc);
-      }
-    }
-    final File clusterCa = new File(SERVICEACCOUNT_CA_PATH);
-    if (clusterCa.exists()) {
-      return cluster();
-    }
-    return new ClientBuilder();
+    return null;
   }
 
   private static File findConfigFromEnv() {
@@ -116,7 +144,6 @@ public class ClientBuilder {
     if (kubeConfigPath == null) {
       return null;
     }
-
     final File kubeConfig = new File(kubeConfigPath);
     if (kubeConfig.exists()) {
       return kubeConfig;
@@ -135,9 +162,7 @@ public class ClientBuilder {
       final String[] filePaths = kubeConfigEnv.split(File.pathSeparator);
       final String kubeConfigPath = filePaths[0];
       if (filePaths.length > 1) {
-        log.warn(
-            "Found multiple kubeconfigs files, $KUBECONFIG: " + kubeConfigEnv + " using first: {}",
-            kubeConfigPath);
+        log.warn("Found multiple kubeconfigs files, $KUBECONFIG: {} using first: {}", kubeConfigEnv, kubeConfigPath);
       }
 
       return kubeConfigPath;
@@ -188,17 +213,17 @@ public class ClientBuilder {
   }
 
   /**
-   * Creates a builder which is pre-configured from the cluster configuration.
+   * [DEPRECATED] Creates a builder which is pre-configured from the cluster configuration.
    *
    * @return <tt>ClientBuilder</tt> configured from the cluster configuration.
    * @throws IOException if the Service Account Token Path or CA Path is not readable.
    */
-  public static ClientBuilder cluster() throws IOException {
+  public static ClientBuilder oldCluster() throws IOException {
     final ClientBuilder builder = new ClientBuilder();
 
     final String host = System.getenv(ENV_SERVICE_HOST);
     final String port = System.getenv(ENV_SERVICE_PORT);
-    builder.setBasePath("https://" + host + ":" + port);
+    builder.setBasePath(host, port);
 
     final String token =
         new String(
@@ -207,6 +232,37 @@ public class ClientBuilder {
     builder.setAuthentication(new AccessTokenAuthentication(token));
 
     return builder;
+  }
+
+  /**
+   * Creates a builder which is pre-configured from the cluster configuration.
+   *
+   * @return <tt>ClientBuilder</tt> configured from the cluster configuration where service account
+   *     token will be reloaded.
+   * @throws IOException if the Service Account Token Path or CA Path is not readable.
+   */
+  public static ClientBuilder cluster() throws IOException {
+    final ClientBuilder builder = new ClientBuilder();
+
+    final String host = System.getenv(ENV_SERVICE_HOST);
+    final String port = System.getenv(ENV_SERVICE_PORT);
+    builder.setBasePath(host, port);
+
+    builder.setCertificateAuthority(Files.readAllBytes(Paths.get(SERVICEACCOUNT_CA_PATH)));
+    builder.setAuthentication(new TokenFileAuthentication(SERVICEACCOUNT_TOKEN_PATH));
+
+    return builder;
+  }
+
+  protected ClientBuilder setBasePath(String host, String port) {
+    try {
+      Integer iPort = Integer.valueOf(port);
+      URI uri = new URI("https", null, host, iPort, null, null, null);
+      this.setBasePath(uri.toString());
+    } catch (NumberFormatException | URISyntaxException e) {
+      throw new IllegalStateException(e);
+    }
+    return this;
   }
 
   /**
@@ -219,9 +275,26 @@ public class ClientBuilder {
    * @throws IOException if the files specified in the provided <tt>KubeConfig</tt> are not readable
    */
   public static ClientBuilder kubeconfig(KubeConfig config) throws IOException {
+    return kubeconfig(config, null);
+  }
+
+  /**
+   * Creates a builder which is pre-configured from a {@link KubeConfig}.
+   *
+   * <p>To load a <tt>KubeConfig</tt>, see {@link KubeConfig#loadKubeConfig(Reader)}.
+   *
+   * @param config The {@link KubeConfig} to configure the builder from.
+   * @param tokenRefreshPeriod If the KubeConfig generates a bearer token, after this interval, it will be refreshed.
+   * @return <tt>ClientBuilder</tt> configured from the provided <tt>KubeConfig</tt>
+   * @throws IOException if the files specified in the provided <tt>KubeConfig</tt> are not readable
+   */
+  public static ClientBuilder kubeconfig(KubeConfig config, Duration tokenRefreshPeriod) throws IOException {
     final ClientBuilder builder = new ClientBuilder();
 
     String server = config.getServer();
+    if (server == null) {
+      throw new IllegalArgumentException("No server in kubeconfig");
+    }
     if (!server.contains("://")) {
       if (server.contains(":443")) {
         server = "https://" + server;
@@ -231,7 +304,7 @@ public class ClientBuilder {
     }
 
     final byte[] caBytes =
-        KubeConfig.getDataOrFile(
+        config.getDataOrFileRelative(
             config.getCertificateAuthorityData(), config.getCertificateAuthorityFile());
     if (caBytes != null) {
       builder.setCertificateAuthority(caBytes);
@@ -239,8 +312,59 @@ public class ClientBuilder {
     builder.setVerifyingSsl(config.verifySSL());
 
     builder.setBasePath(server);
-    builder.setAuthentication(new KubeconfigAuthentication(config));
+    builder.setAuthentication(new KubeconfigAuthentication(config, tokenRefreshPeriod));
     return builder;
+  }
+
+  /**
+   * Returns a new ApiClient instance reading from CertificateSigningRequest.
+   *
+   * <p>It will create a CertificateSigningRequest object to the cluster if it doesn't exist, and
+   * waits until the request is approved.
+   *
+   * @param bootstrapKubeConfig the bootstrap kube config
+   * @param privateKey the private key
+   * @param csr the csr
+   * @return the api client
+   * @throws IOException the io exception
+   * @throws CSRNotApprovedException the csr not approved exception
+   * @throws ApiException the api exception
+   */
+  public static ApiClient fromCertificateSigningRequest(
+      KubeConfig bootstrapKubeConfig, PrivateKey privateKey, V1CertificateSigningRequest csr)
+      throws IOException, CSRNotApprovedException, ApiException {
+    // creates CSR or checks whether the existing one conflicts.
+    ApiClient bootstrapApiClient = ClientBuilder.kubeconfig(bootstrapKubeConfig).build();
+    return fromCertificateSigningRequest(bootstrapApiClient, privateKey, csr);
+  }
+
+  /**
+   * Returns a new ApiClient instance reading from CertificateSigningRequest.
+   *
+   * <p>It will create a CertificateSigningRequest object to the cluster if it doesn't exist, and
+   * waits until the request is approved.
+   *
+   * @param bootstrapApiClient the bootstrap api client
+   * @param privateKey the private key
+   * @param csr the csr
+   * @return the api client
+   * @throws IOException the io exception
+   * @throws CSRNotApprovedException the csr not approved exception
+   * @throws ApiException the api exception
+   */
+  public static ApiClient fromCertificateSigningRequest(
+      ApiClient bootstrapApiClient, PrivateKey privateKey, V1CertificateSigningRequest csr)
+      throws IOException, CSRNotApprovedException, ApiException {
+    byte[] certificateData = CSRUtils.createAndWaitUntilCertificateSigned(bootstrapApiClient, csr);
+    InputStream is = bootstrapApiClient.getSslCaCert();
+    is.reset();
+    ClientBuilder newBuilder = new ClientBuilder();
+    newBuilder.setAuthentication(
+        new ClientCertificateAuthentication(certificateData, SSLUtils.dumpKey(privateKey)));
+    newBuilder.setBasePath(bootstrapApiClient.getBasePath());
+    newBuilder.setVerifyingSsl(bootstrapApiClient.isVerifyingSsl());
+    newBuilder.setCertificateAuthority(IOUtils.toByteArray(is));
+    return newBuilder.build();
   }
 
   public String getBasePath() {
@@ -275,17 +399,53 @@ public class ClientBuilder {
     return this;
   }
 
-  public String overridePatchFormat() {
-    return overridePatchFormat;
+  public ClientBuilder setProtocols(List<Protocol> protocols) {
+    this.protocols = protocols;
+    return this;
   }
 
-  public ClientBuilder setOverridePatchFormat(String patchFormat) {
-    this.overridePatchFormat = patchFormat;
+  public List<Protocol> getProtocols() {
+    return protocols;
+  }
+
+  public ClientBuilder setReadTimeout(Duration readTimeout) {
+    this.readTimeout = readTimeout;
+    return this;
+  }
+
+  public Duration getReadTimeout() {
+    return this.readTimeout;
+  }
+
+  public ClientBuilder setPingInterval(Duration pingInterval) {
+    this.pingInterval = pingInterval;
+    return this;
+  }
+
+  public Duration getPingInterval() {
+    return this.pingInterval;
+  }
+
+  public String getKeyStorePassphrase() {
+    return keyStorePassphrase;
+  }
+
+  public ClientBuilder setKeyStorePassphrase(String keyStorePassphrase) {
+    this.keyStorePassphrase = keyStorePassphrase;
     return this;
   }
 
   public ApiClient build() {
     final ApiClient client = new ApiClient();
+
+    client.setHttpClient(
+        client
+            .getHttpClient()
+            .newBuilder()
+            .protocols(protocols)
+            .readTimeout(this.readTimeout)
+            .pingInterval(pingInterval)
+            .build());
 
     if (basePath != null) {
       if (basePath.endsWith("/")) {
@@ -297,6 +457,16 @@ public class ClientBuilder {
     client.setVerifyingSsl(verifyingSsl);
 
     if (authentication != null) {
+      if (StringUtils.isNotEmpty(keyStorePassphrase)) {
+        if (authentication instanceof KubeconfigAuthentication) {
+          if (((KubeconfigAuthentication) authentication).getDelegateAuthentication()
+              instanceof ClientCertificateAuthentication) {
+            ((ClientCertificateAuthentication)
+                    (((KubeconfigAuthentication) authentication).getDelegateAuthentication()))
+                .setPassphrase(keyStorePassphrase);
+          }
+        }
+      }
       authentication.provide(client);
     }
 
@@ -313,31 +483,6 @@ public class ClientBuilder {
       client.setSslCaCert(new ByteArrayInputStream(caCertBytes));
     }
 
-    if (!Strings.isNullOrEmpty(overridePatchFormat)) {
-      client
-          .getHttpClient()
-          .interceptors()
-          .add(
-              new Interceptor() {
-                @Override
-                public Response intercept(Chain chain) throws IOException {
-                  Request request = chain.request();
-
-                  if ("PATCH".equals(request.method())) {
-
-                    Request newRequest =
-                        request
-                            .newBuilder()
-                            .patch(
-                                new ProxyContentTypeRequestBody(
-                                    request.body(), overridePatchFormat))
-                            .build();
-                    return chain.proceed(newRequest);
-                  }
-                  return chain.proceed(request);
-                }
-              });
-    }
     return client;
   }
 }

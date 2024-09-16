@@ -1,13 +1,27 @@
+/*
+Copyright 2020 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package io.kubernetes.client.extended.leaderelection.resourcelock;
 
-import io.kubernetes.client.ApiClient;
-import io.kubernetes.client.ApiException;
-import io.kubernetes.client.Configuration;
-import io.kubernetes.client.apis.CoreV1Api;
 import io.kubernetes.client.extended.leaderelection.LeaderElectionRecord;
 import io.kubernetes.client.extended.leaderelection.Lock;
-import io.kubernetes.client.models.V1ConfigMap;
-import io.kubernetes.client.models.V1ObjectMeta;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.Configuration;
+import io.kubernetes.client.openapi.apis.CoreV1Api;
+import io.kubernetes.client.openapi.models.V1ConfigMap;
+import io.kubernetes.client.openapi.models.V1ObjectMeta;
+import java.net.HttpURLConnection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -44,7 +58,9 @@ public class ConfigMapLock implements Lock {
 
   @Override
   public LeaderElectionRecord get() throws ApiException {
-    V1ConfigMap configMap = coreV1Client.readNamespacedConfigMap(name, namespace, null, null, null);
+    V1ConfigMap configMap = coreV1Client.readNamespacedConfigMap(name, namespace).execute();
+    configMapRefer.set(configMap);
+
     Map<String, String> annotations = configMap.getMetadata().getAnnotations();
     if (annotations == null || annotations.isEmpty()) {
       configMap.getMetadata().setAnnotations(new HashMap<>());
@@ -60,7 +76,7 @@ public class ConfigMapLock implements Lock {
             .getApiClient()
             .getJSON()
             .deserialize(recordRawStringContent, LeaderElectionRecord.class);
-    configMapRefer.set(configMap);
+
     return record;
   }
 
@@ -76,13 +92,20 @@ public class ConfigMapLock implements Lock {
           LeaderElectionRecordAnnotationKey,
           coreV1Client.getApiClient().getJSON().serialize(record));
       objectMeta.setAnnotations(annotations);
+      if (record.getOwnerReference() != null) {
+        objectMeta.setOwnerReferences(Collections.singletonList(record.getOwnerReference()));
+      }
       configMap.setMetadata(objectMeta);
       V1ConfigMap createdConfigMap =
-          coreV1Client.createNamespacedConfigMap(namespace, configMap, null, null, null);
+          coreV1Client.createNamespacedConfigMap(namespace, configMap).execute();
       configMapRefer.set(createdConfigMap);
       return true;
-    } catch (Throwable t) {
-      log.error("failed to create leader election record as {}", t.getMessage());
+    } catch (ApiException e) {
+      if (e.getCode() == HttpURLConnection.HTTP_CONFLICT) {
+        log.debug("received {} when creating configmap lock", e.getCode(), e);
+      } else {
+        log.error("received {} when creating configmap lock", e.getCode(), e);
+      }
       return false;
     }
   }
@@ -96,12 +119,18 @@ public class ConfigMapLock implements Lock {
           .putAnnotationsItem(
               LeaderElectionRecordAnnotationKey,
               coreV1Client.getApiClient().getJSON().serialize(record));
+      // TODO consider to retry if receiving a 409 code
       V1ConfigMap replacedConfigMap =
-          coreV1Client.replaceNamespacedConfigMap(name, namespace, configMap, null, null, null);
+          coreV1Client.replaceNamespacedConfigMap(
+              name, namespace, configMap).execute();
       configMapRefer.set(replacedConfigMap);
       return true;
-    } catch (Throwable t) {
-      log.error("failed to update leader election record as {}", t.getMessage());
+    } catch (ApiException e) {
+      if (e.getCode() == HttpURLConnection.HTTP_CONFLICT) {
+        log.debug("received {} when updating configmap lock", e.getCode(), e);
+      } else {
+        log.error("received {} when updating configmap lock", e.getCode(), e);
+      }
       return false;
     }
   }

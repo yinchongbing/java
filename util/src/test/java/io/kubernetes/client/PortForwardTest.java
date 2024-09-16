@@ -1,9 +1,9 @@
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,17 +16,18 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
-import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
-import static com.github.tomakehurst.wiremock.client.WireMock.verify;
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
 import static io.kubernetes.client.ExecTest.makeStream;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.github.tomakehurst.wiremock.junit.WireMockRule;
+import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import io.kubernetes.client.PortForward.PortForwardResult;
-import io.kubernetes.client.models.V1ObjectMeta;
-import io.kubernetes.client.models.V1Pod;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.models.V1ObjectMeta;
+import io.kubernetes.client.openapi.models.V1Pod;
 import io.kubernetes.client.util.ClientBuilder;
 import io.kubernetes.client.util.WebSocketStreamHandler;
 import java.io.IOException;
@@ -34,37 +35,36 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 /** Tests for the PortForward helper class */
-public class PortForwardTest {
+class PortForwardTest {
   private String namespace;
   private String podName;
-  private String container;
 
   private ApiClient client;
 
-  private static final int PORT = 8089;
-  @Rule public WireMockRule wireMockRule = new WireMockRule(PORT);
+  @RegisterExtension
+  static WireMockExtension apiServer =
+      WireMockExtension.newInstance().options(options().dynamicPort()).build();
 
-  @Before
-  public void setup() throws IOException {
-    client = new ClientBuilder().setBasePath("http://localhost:" + PORT).build();
+  @BeforeEach
+  void setup() {
+    client = new ClientBuilder().setBasePath("http://localhost:" + apiServer.getPort()).build();
 
     namespace = "default";
     podName = "apod";
-    container = "acontainer";
   }
 
   @Test
-  public void testUrl() throws IOException, ApiException, InterruptedException {
+  void url() throws IOException, ApiException {
     PortForward forward = new PortForward(client);
 
     V1Pod pod = new V1Pod().metadata(new V1ObjectMeta().name(podName).namespace(namespace));
 
-    stubFor(
+    apiServer.stubFor(
         get(urlPathEqualTo("/api/v1/namespaces/" + namespace + "/pods/" + podName + "/portforward"))
             .willReturn(
                 aResponse()
@@ -75,13 +75,15 @@ public class PortForwardTest {
     int portNumber = 8080;
     List<Integer> ports = new ArrayList<>();
     ports.add(portNumber);
-    forward.forward(pod, ports);
+    assertThatThrownBy(
+        () -> {
+          InputStream inputStream = forward.forward(pod, ports).getInputStream(portNumber);
+          // block until the connection is established
+          inputStream.read();
+          inputStream.close();
+        }).isInstanceOf(ApiException.class);
 
-    // TODO: Kill this sleep, the trouble is that the test tries to validate before the connection
-    // event has happened
-    Thread.sleep(2000);
-
-    verify(
+    apiServer.verify(
         getRequestedFor(
                 urlPathEqualTo(
                     "/api/v1/namespaces/" + namespace + "/pods/" + podName + "/portforward"))
@@ -89,7 +91,7 @@ public class PortForwardTest {
   }
 
   @Test
-  public void testPortForwardResult() throws IOException, InterruptedException {
+  void portForwardResult() throws IOException, InterruptedException {
     WebSocketStreamHandler handler = new WebSocketStreamHandler();
     List<Integer> ports = new ArrayList<>();
     ports.add(80);
@@ -127,27 +129,65 @@ public class PortForwardTest {
     }
 
     InputStream is = result.getInputStream(80);
-    assertNotNull(is);
+    assertThat(is).isNotNull();
 
     InputStream is2 = result.getInputStream(800);
-    assertNotNull(is2);
+    assertThat(is2).isNotNull();
 
     byte[] bytes = new byte[msgData.length()];
     for (int i = 0; i < msgData.length(); i++) {
       bytes[i] = (byte) is.read();
     }
 
-    assertEquals(msgData, new String(bytes, StandardCharsets.UTF_8));
+    assertThat(new String(bytes, StandardCharsets.UTF_8)).isEqualTo(msgData);
 
     bytes = new byte[msgData2.length()];
     for (int i = 0; i < msgData2.length(); i++) {
       bytes[i] = (byte) is2.read();
     }
 
-    assertEquals(msgData2, new String(bytes, StandardCharsets.UTF_8));
+    assertThat(new String(bytes, StandardCharsets.UTF_8)).isEqualTo(msgData2);
 
-    assertEquals(null, result.getInputStream(8080));
-    assertEquals(null, result.getErrorStream(8080));
-    assertEquals(null, result.getOutboundStream(8080));
+    assertThat(result.getInputStream(8080)).isEqualTo(null);
+    assertThat(result.getErrorStream(8080)).isEqualTo(null);
+    assertThat(result.getOutboundStream(8080)).isEqualTo(null);
+  }
+
+  private Exception thrownException;
+
+  @Test
+  void brokenPortPassing() throws IOException, InterruptedException {
+    WebSocketStreamHandler handler = new WebSocketStreamHandler();
+    List<Integer> ports = new ArrayList<>();
+    ports.add(80);
+
+    final PortForwardResult result = new PortForwardResult(handler, ports);
+
+    String msgData = "this is a test datum";
+    handler.open("wss", null);
+    handler.bytesMessage(makeStream(new byte[] {66}, msgData.getBytes(StandardCharsets.UTF_8)));
+
+    final Object block = new Object();
+    Thread t =
+        new Thread(
+            () -> {
+              try {
+                result.init();
+              } catch (IOException ex) {
+                thrownException = ex;
+              } finally {
+                synchronized (block) {
+                  block.notifyAll();
+                }
+              }
+            });
+    synchronized (block) {
+      t.start();
+      Thread.sleep(2000);
+      handler.close();
+      block.wait();
+    }
+
+    assertThat(thrownException).isInstanceOf(IOException.class);
   }
 }

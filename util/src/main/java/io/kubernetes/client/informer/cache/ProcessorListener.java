@@ -1,29 +1,42 @@
+/*
+Copyright 2020 The Kubernetes Authors.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 package io.kubernetes.client.informer.cache;
 
+import io.kubernetes.client.common.KubernetesObject;
 import io.kubernetes.client.informer.ResourceEventHandler;
 import io.kubernetes.client.informer.exception.BadNotificationException;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.concurrent.BlockingQueue;
-import org.joda.time.DateTime;
+import java.util.concurrent.LinkedBlockingQueue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * ProcessorListener implements Runnable interface. It's supposed to run in background and actually
- * executes its event handler on notification. Note that it allows 1000 pending notifications at
- * maximum.
+ * executes its event handler on notification.
  */
-public class ProcessorListener<ApiType> implements Runnable {
+public class ProcessorListener<ApiType extends KubernetesObject> implements Runnable {
 
   private static final Logger log = LoggerFactory.getLogger(ProcessorListener.class);
 
-  private static final int DEFAULT_QUEUE_CAPACITY = 1000;
-
-  // resyncPeriod is how frequently the listener wants a full resync from the shared informer. This
-  // value may differ from requestedResyncPeriod if the shared informer adjusts it to align with the
+  // resyncPeriod is how frequently the listener wants a full resync from the shared informer.
+  // This
+  // value may differ from requestedResyncPeriod if the shared informer adjusts it to align with
+  // the
   // informer's overall resync check period.
   private long resyncPeriod;
-  private DateTime nextResync;
+  private OffsetDateTime nextResync;
 
   private BlockingQueue<Notification> queue;
 
@@ -33,9 +46,9 @@ public class ProcessorListener<ApiType> implements Runnable {
     this.resyncPeriod = resyncPeriod;
     this.handler = handler;
 
-    this.queue = new ArrayBlockingQueue<>(DEFAULT_QUEUE_CAPACITY);
+    this.queue = new LinkedBlockingQueue<>();
 
-    determineNextResync(DateTime.now());
+    determineNextResync(OffsetDateTime.now());
   }
 
   @Override
@@ -45,24 +58,42 @@ public class ProcessorListener<ApiType> implements Runnable {
         Notification obj = queue.take();
         if (obj instanceof UpdateNotification) {
           UpdateNotification notification = (UpdateNotification) obj;
-          this.handler.onUpdate(
-              (ApiType) notification.getOldObj(), (ApiType) notification.getNewObj());
+          try {
+            this.handler.onUpdate(
+                (ApiType) notification.getOldObj(), (ApiType) notification.getNewObj());
+          } catch (Throwable t) {
+            // Catch all exceptions here so that listeners won't quit unexpectedly
+            log.error("failed invoking UPDATE event handler: {}", t);
+            continue;
+          }
         } else if (obj instanceof AddNotification) {
           AddNotification notification = (AddNotification) obj;
-          this.handler.onAdd((ApiType) notification.getNewObj());
+          try {
+            this.handler.onAdd((ApiType) notification.getNewObj());
+          } catch (Throwable t) {
+            // Catch all exceptions here so that listeners won't quit unexpectedly
+            log.error("failed invoking ADD event handler: {}", t);
+            continue;
+          }
         } else if (obj instanceof DeleteNotification) {
           Object deletedObj = ((DeleteNotification) obj).getOldObj();
-          if (deletedObj instanceof DeltaFIFO.DeletedFinalStateUnknown) {
-            this.handler.onDelete(
-                ((DeltaFIFO.DeletedFinalStateUnknown<ApiType>) deletedObj).getObj(), true);
-          } else {
-            this.handler.onDelete((ApiType) deletedObj, false);
+          try {
+            if (deletedObj instanceof DeltaFIFO.DeletedFinalStateUnknown) {
+              this.handler.onDelete(
+                  ((DeltaFIFO.DeletedFinalStateUnknown<ApiType>) deletedObj).getObj(), true);
+            } else {
+              this.handler.onDelete((ApiType) deletedObj, false);
+            }
+          } catch (Throwable t) {
+            // Catch all exceptions here so that listeners won't quit unexpectedly
+            log.error("failed invoking DELETE event handler: {}", t);
+            continue;
           }
         } else {
           throw new BadNotificationException("unrecognized notification");
         }
       } catch (InterruptedException e) {
-        log.error("processor interrupted: {}", e.getMessage());
+        log.error("processor interrupted: {}", e);
         return;
       }
     }
@@ -75,11 +106,11 @@ public class ProcessorListener<ApiType> implements Runnable {
     this.queue.add(obj);
   }
 
-  public void determineNextResync(DateTime now) {
-    this.nextResync = now.plus(this.resyncPeriod);
+  public void determineNextResync(OffsetDateTime now) {
+    this.nextResync = now.plus(Duration.ofMillis(this.resyncPeriod));
   }
 
-  public boolean shouldResync(DateTime now) {
+  public boolean shouldResync(OffsetDateTime now) {
     return this.resyncPeriod != 0 && (now.isAfter(this.nextResync) || now.equals(this.nextResync));
   }
 

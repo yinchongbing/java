@@ -1,199 +1,41 @@
 # Kubernetes Java Client
 
-[![Build Status](https://travis-ci.org/kubernetes-client/java.svg?branch=master)](https://travis-ci.org/kubernetes-client/java)
-[![Client Capabilities](https://img.shields.io/badge/Kubernetes%20client-Silver-blue.svg?style=flat&colorB=C0C0C0&colorA=306CE8)](http://bit.ly/kubernetes-client-capabilities-badge)
-[![Client Support Level](https://img.shields.io/badge/kubernetes%20client-beta-green.svg?style=flat&colorA=306CE8)](http://bit.ly/kubernetes-client-support-badge)
+[![build](https://github.com/kubernetes-client/java/workflows/build/badge.svg)](https://github.com/kubernetes-client/java/actions/workflows/maven.yml)
+[![Client Capabilities](https://img.shields.io/badge/Kubernetes%20client-Silver-blue.svg?style=flat&colorB=C0C0C0&colorA=306CE8)](https://bit.ly/kubernetes-client-capabilities-badge)
+[![Client Support Level](https://img.shields.io/badge/kubernetes%20client-beta-green.svg?style=flat&colorA=306CE8)](https://bit.ly/kubernetes-client-support-badge)
+[![Maven Central](https://img.shields.io/maven-central/v/io.kubernetes/client-java.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:%22io.kubernetes%22%20AND%20a:%22client-java%22)
+![Sonatype Nexus (Snapshots)](https://img.shields.io/nexus/s/io.kubernetes/client-java?label=Maven%20Snapshot&server=https%3A%2F%2Foss.sonatype.org)
 
-Java client for the [kubernetes](http://kubernetes.io/) API.
+Java client for the [kubernetes](https://kubernetes.io/) API.
 
-## Client versioning
-The Java client uses Semantic Versioning. We increment the major version number whenever we
-regenerate the client for a new Kubernetes release version (see table below). Whenever we do
-this there are new APIs added and possibly breaking changes in the generated Kubernetes API
-Stubs. Whenever you upgrade a major version, be prepared for potential breaking changes.
+## To start using Kubernetes Java Client
 
-## Installation
+See the wiki page and documentation [here](https://github.com/kubernetes-client/java/wiki).
 
-To install the Java client library to your local Maven repository, simply execute:
+- [Installation](https://github.com/kubernetes-client/java/wiki/1.-Installation)
+- [Client Versioning and Compatibility](https://github.com/kubernetes-client/java/wiki/2.-Versioning-and-Compatibility)
+- [Code Examples](https://github.com/kubernetes-client/java/wiki/3.-Code-Examples)
 
-```shell
-git clone --recursive https://github.com/kubernetes-client/java
-cd java
-mvn install
-```
+## Release
 
-Refer to the [official documentation](https://maven.apache.org/plugins/maven-deploy-plugin/usage.html) for more information.
+Starting from `20.0.0` (Kubernetes 1.28), `client-java-api` was introduced non-backward-compatible changes. Optional 
+parameters are now consolidated into a single object, and Java8 support has been removed. For Java8 users or those 
+preferring the old SDK interface, a legacy SDK module version is available with a "-legacy" suffix, like `20.0.0-legacy`.
 
-### Maven users
+## Development
 
-Add this dependency to your project's POM:
+- [Development and Contributing](https://github.com/kubernetes-client/java/wiki/4.-Development-and-Contributing)
+- [Generate Java CRD Models](https://github.com/kubernetes-client/java/wiki/5.-Generate-Java-CRD-Model)
+- [Known Issues](https://github.com/kubernetes-client/java/wiki/6.-Known-Issues)
+- [Troubleshooting/FAQ](https://github.com/kubernetes-client/java/wiki/7.-FAQ)
 
-```xml
-<dependency>
-    <groupId>io.kubernetes</groupId>
-    <artifactId>client-java</artifactId>
-    <version>4.0.0</version>
-    <scope>compile</scope>
-</dependency>
-```
+## Support
 
-### Gradle users
+If you need support, start with checking whether you're hitting known issues. If that doesn't work, please [open an issue](https://github.com/kubernetes-client/java/issues/new)
+to describe the cases. Additionally, before you file an issue, please search [existing issues](https://github.com/kubernetes-client/java/issues)
+to see if your issue is 
+already covered.
 
-```groovy
-compile 'io.kubernetes:client-java:4.0.0'
-```
+You can also reach out to us via [#kubernetes-client](https://kubernetes.slack.com/messages/kubernetes-clients/) slack 
+channel.
 
-### Others
-
-At first generate the JAR by executing:
-
-```
-git clone --recursive https://github.com/kubernetes-client/java
-cd java
-cd kubernetes
-mvn package
-```
-
-Then manually install the following JARs:
-
-* target/client-java-api-4.0.0-beta1-SNAPSHOT.jar
-* target/lib/*.jar
-
-## Example
-
-list all pods:
-
-```java
-import io.kubernetes.client.ApiClient;
-import io.kubernetes.client.ApiException;
-import io.kubernetes.client.Configuration;
-import io.kubernetes.client.apis.CoreV1Api;
-import io.kubernetes.client.models.V1Pod;
-import io.kubernetes.client.models.V1PodList;
-import io.kubernetes.client.util.Config;
-
-import java.io.IOException;
-
-public class Example {
-    public static void main(String[] args) throws IOException, ApiException{
-        ApiClient client = Config.defaultClient();
-        Configuration.setDefaultApiClient(client);
-
-        CoreV1Api api = new CoreV1Api();
-        V1PodList list = api.listPodForAllNamespaces(null, null, null, null, null, null, null, null, null);
-        for (V1Pod item : list.getItems()) {
-            System.out.println(item.getMetadata().getName());
-        }
-    }
-}
-```
-
-watch on namespace object:
-
-```java
-import com.google.gson.reflect.TypeToken;
-import io.kubernetes.client.ApiClient;
-import io.kubernetes.client.ApiException;
-import io.kubernetes.client.Configuration;
-import io.kubernetes.client.apis.CoreV1Api;
-import io.kubernetes.client.models.V1Namespace;
-import io.kubernetes.client.util.Config;
-import io.kubernetes.client.util.Watch;
-
-import java.io.IOException;
-
-public class WatchExample {
-    public static void main(String[] args) throws IOException, ApiException{
-        ApiClient client = Config.defaultClient();
-        Configuration.setDefaultApiClient(client);
-
-        CoreV1Api api = new CoreV1Api();
-
-        Watch<V1Namespace> watch = Watch.createWatch(
-                client,
-                api.listNamespaceCall(null, null, null, null, null, 5, null, null, Boolean.TRUE, null, null),
-                new TypeToken<Watch.Response<V1Namespace>>(){}.getType());
-
-        for (Watch.Response<V1Namespace> item : watch) {
-            System.out.printf("%s : %s%n", item.type, item.object.getMetadata().getName());
-        }
-    }
-}
-```
-
-More examples can be found in [examples](examples/) folder. To run examples, run this command:
-
-```shell
-mvn exec:java -Dexec.mainClass="io.kubernetes.client.examples.Example"
-```
-
-## Documentation
-
-All APIs and Models' documentation can be found at the [Generated client's docs](https://github.com/kubernetes-client/java/tree/master/kubernetes/docs)
-
-## Compatibility
-
-|  client version  | 1.9     | 1.10      | 1.11     | 1.12     |  1.13     |  1.14    |
-|------------------|---------|-----------|----------|----------|-----------|----------|
-|  2.0.0           |  ✓      |  -        |  -       |  -       | -         | -        |
-|  3.0.0           |  +      |  -        |  ✓       |  -       | -         | -        |
-|  4.0.0           |  +      |  +        |  +       |  ✓       | -         | -        |
-|  5.0.0           |  +      |  +        |  +       |  +       | ✓         | -        |
-|  6.0.0-beta1     |  +      |  +        |  +       |  +       | +         | ✓        |
-
-Key: 
-
-* `✓` Exactly the same features / API objects in both java-client and the Kubernetes
-  version.
-* `+` java-client has features or api objects that may not be present in the
-  Kubernetes cluster, but everything they have in common will work.
-* `-` The Kubernetes cluster has features the java-client library can't use
-  (additional API objects, etc).
-
-See the [CHANGELOG](./CHANGELOG.md) for a detailed description of changes
-between java-client versions.
-
-## Contributing
-
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on how to contribute.
-
-### Code of Conduct
-
-Participation in the Kubernetes community is governed by the [CNCF Code of Conduct](https://github.com/cncf/foundation/blob/master/code-of-conduct.md).
-
-# Development
-
-## Update the generated code.
-
-The code is generated by the [swagger-codegen project](https://github.com/swagger-api/swagger-codegen).
-
-We have built general purpose cross-language tools for generating code, it is hosted in the
-[kubernetes-client/gen](https://github.com/kubernetes-client/gen) repository.
-
-To get started, in a root directory that is _not_ your `java` client directory, for example your
-directory layout could be:
-```
-${HOME}/
-        src/
-             gen/
-             java/
-...
-```
-
-Then to clone the `gen` repository, you would run:
-
-```sh
-cd ${HOME}/src
-git clone https://github.com/kubernetes-client/gen
-export GEN_ROOT=${PWD}
-```
-
-Then to update the client:
-
-```sh
-cd ${HOME}/src/java
-${GEN_ROOT}/gen/openapi/java.sh kubernetes ./settings
-```
-
-This should run through a long-ish build process involving `docker` and eventually result in a new set of
-generated code in the `kubernetes` directory.

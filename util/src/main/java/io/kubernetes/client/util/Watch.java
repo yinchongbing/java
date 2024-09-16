@@ -1,9 +1,9 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,16 +15,17 @@ package io.kubernetes.client.util;
 import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
-import com.squareup.okhttp.Call;
-import com.squareup.okhttp.ResponseBody;
-import io.kubernetes.client.ApiClient;
-import io.kubernetes.client.ApiException;
-import io.kubernetes.client.JSON;
-import io.kubernetes.client.models.V1Status;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.JSON;
+import io.kubernetes.client.openapi.models.V1Status;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.StringReader;
 import java.lang.reflect.Type;
 import java.util.Iterator;
+import okhttp3.Call;
+import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +35,7 @@ import org.slf4j.LoggerFactory;
  * example CoreV1Api.listNamespace has watch parameter, so you can create a call using
  * CoreV1Api.listNamespaceCall and set watch to True and watch the changes to namespaces.
  */
-public class Watch<T> implements Watchable<T> {
+public class Watch<T> implements Watchable<T>, Closeable {
 
   private static final Logger log = LoggerFactory.getLogger(Watch.class);
 
@@ -50,6 +51,8 @@ public class Watch<T> implements Watchable<T> {
     public T object;
 
     public V1Status status;
+
+    public Response() {}
 
     public Response(String type, T object) {
       this.type = type;
@@ -89,12 +92,12 @@ public class Watch<T> implements Watchable<T> {
       throw new ApiException("Watch is incompatible with debugging mode active.");
     }
     try {
-      com.squareup.okhttp.Response response = call.execute();
+      okhttp3.Response response = call.execute();
       if (!response.isSuccessful()) {
         String respBody = null;
         try (ResponseBody body = response.body()) {
           if (body != null) {
-            respBody = response.body().string();
+            respBody = body.string();
           }
         } catch (IOException e) {
           throw new ApiException(
@@ -161,10 +164,7 @@ public class Watch<T> implements Watchable<T> {
         break;
       }
     }
-    if ("Status".equals(kind) && "v1".equals(apiVersion)) {
-      return true;
-    }
-    return false;
+    return "Status".equals(kind) && "v1".equals(apiVersion);
   }
 
   protected Response<T> parseLine(String line) throws IOException {

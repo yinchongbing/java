@@ -1,34 +1,37 @@
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package io.kubernetes.client;
 
-import com.google.common.io.ByteStreams;
-import com.google.common.primitives.Bytes;
+import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.Message;
-import com.squareup.okhttp.MediaType;
-import com.squareup.okhttp.Request;
-import com.squareup.okhttp.RequestBody;
-import com.squareup.okhttp.Response;
+import com.google.protobuf.Message.Builder;
+import io.kubernetes.client.openapi.ApiClient;
+import io.kubernetes.client.openapi.ApiException;
+import io.kubernetes.client.openapi.Configuration;
+import io.kubernetes.client.openapi.Pair;
 import io.kubernetes.client.proto.Meta.DeleteOptions;
 import io.kubernetes.client.proto.Meta.Status;
 import io.kubernetes.client.proto.Runtime.TypeMeta;
 import io.kubernetes.client.proto.Runtime.Unknown;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
+import okhttp3.MediaType;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okio.BufferedSource;
+import okio.ByteString;
 
 public class ProtoClient {
   /**
@@ -58,9 +61,10 @@ public class ProtoClient {
   // Magic number for the beginning of proto encoded.
   // https://github.com/kubernetes/apimachinery/blob/release-1.13/pkg/runtime/serializer/protobuf/protobuf.go#L44
   private static final byte[] MAGIC = new byte[] {0x6b, 0x38, 0x73, 0x00};
+  private static final ByteString MAGIC_BYTESTRING = ByteString.of(MAGIC);
   private static final String MEDIA_TYPE = "application/vnd.kubernetes.protobuf";
 
-  /** Simple Protocol Budder API client constructor, uses default configuration */
+  /** Simple Protocol Buffers API client constructor, uses default configuration */
   public ProtoClient() {
     this(Configuration.getDefaultApiClient());
   }
@@ -192,29 +196,21 @@ public class ProtoClient {
     String[] localVarAuthNames = new String[] {"BearerToken"};
     Request request =
         apiClient.buildRequest(
+            apiClient.getBasePath(),
             path,
             "DELETE",
             new ArrayList<Pair>(),
             new ArrayList<Pair>(),
             null,
             headers,
+            new HashMap<String, String>(),
             new HashMap<String, Object>(),
             localVarAuthNames,
             null);
     byte[] bytes = encode(deleteOptions, "v1", "DeleteOptions");
     request =
         request.newBuilder().delete(RequestBody.create(MediaType.parse(MEDIA_TYPE), bytes)).build();
-    Response resp = apiClient.getHttpClient().newCall(request).execute();
-    Unknown u = parse(resp.body().byteStream());
-    resp.body().close();
-
-    if (u.getTypeMeta().getApiVersion().equals("v1")
-        && u.getTypeMeta().getKind().equals("Status")) {
-      Status status = Status.newBuilder().mergeFrom(u.getRaw()).build();
-      return new ObjectOrStatus(null, status);
-    }
-
-    return new ObjectOrStatus((T) builder.mergeFrom(u.getRaw()).build(), null);
+    return getObjectOrStatusFromServer(builder, request);
   }
 
   /**
@@ -240,12 +236,14 @@ public class ProtoClient {
     String[] localVarAuthNames = new String[] {"BearerToken"};
     Request request =
         apiClient.buildRequest(
+                apiClient.getBasePath(),
             path,
             method,
             new ArrayList<Pair>(),
             new ArrayList<Pair>(),
             null,
             headers,
+            new HashMap<String, String>(),
             new HashMap<String, Object>(),
             localVarAuthNames,
             null);
@@ -277,17 +275,24 @@ public class ProtoClient {
           throw new ApiException("Unknown proto client API method: " + method);
       }
     }
-    Response resp = apiClient.getHttpClient().newCall(request).execute();
-    Unknown u = parse(resp.body().byteStream());
-    resp.body().close();
+    return getObjectOrStatusFromServer(builder, request);
+  }
+
+  private <T extends Message> ObjectOrStatus<T> getObjectOrStatusFromServer(
+      Builder builder, Request request) throws IOException, ApiException {
+    Unknown u;
+    try (Response resp = apiClient.getHttpClient().newCall(request).execute()) {
+      // Note: closing the response, closes the body and the underlying source.
+      u = parse(resp.body().source());
+    }
 
     if (u.getTypeMeta().getApiVersion().equals("v1")
         && u.getTypeMeta().getKind().equals("Status")) {
       Status status = Status.newBuilder().mergeFrom(u.getRaw()).build();
-      return new ObjectOrStatus(null, status);
+      return new ObjectOrStatus<>(null, status);
     }
 
-    return new ObjectOrStatus((T) builder.mergeFrom(u.getRaw()).build(), null);
+    return new ObjectOrStatus<>((T) builder.mergeFrom(u.getRaw()).build(), null);
   }
 
   // This isn't really documented anywhere except the code, but
@@ -298,7 +303,7 @@ public class ProtoClient {
   //     encoding of the actual object.
   // TODO: Document this somewhere proper.
 
-  private byte[] encode(Message msg, String apiVersion, String kind) {
+  private static byte[] encode(Message msg, String apiVersion, String kind) throws IOException {
     // It is unfortunate that we have to include apiVersion and kind,
     // since we should be able to extract it from the Message, but
     // for now at least, those fields are missing from the proto-buffer.
@@ -307,15 +312,27 @@ public class ProtoClient {
             .setTypeMeta(TypeMeta.newBuilder().setApiVersion(apiVersion).setKind(kind))
             .setRaw(msg.toByteString())
             .build();
-    return Bytes.concat(MAGIC, u.toByteArray());
+
+    // Encode directly to a sized array, to eliminate buffering
+    int serializedSize = u.getSerializedSize();
+    byte[] result = new byte[MAGIC.length + u.getSerializedSize()];
+    System.arraycopy(MAGIC, 0, result, 0, MAGIC.length);
+    u.writeTo(CodedOutputStream.newInstance(result, MAGIC.length, serializedSize));
+    return result;
   }
 
-  private Unknown parse(InputStream stream) throws ApiException, IOException {
-    byte[] magic = new byte[4];
-    ByteStreams.readFully(stream, magic);
-    if (!Arrays.equals(magic, MAGIC)) {
-      throw new ApiException("Unexpected magic number: " + magic);
+  private static Unknown parse(BufferedSource responseBody) throws ApiException, IOException {
+    if (!responseBody.request(MAGIC.length)) {
+      throw new ApiException("Truncated reading magic number");
     }
-    return Unknown.parseFrom(stream);
+
+    // Check the magic without allocating a byte array
+    if (responseBody.rangeEquals(0, MAGIC_BYTESTRING)) {
+      responseBody.skip(MAGIC.length);
+    } else {
+      ByteString badMagic = responseBody.readByteString(MAGIC.length);
+      throw new ApiException("Unexpected magic number: " + badMagic.hex());
+    }
+    return Unknown.parseFrom(responseBody.inputStream());
   }
 }

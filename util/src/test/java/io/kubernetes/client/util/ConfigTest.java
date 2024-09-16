@@ -1,9 +1,9 @@
 /*
-Copyright 2017 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -12,33 +12,41 @@ limitations under the License.
 */
 package io.kubernetes.client.util;
 
-import static org.junit.Assert.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import io.kubernetes.client.ApiClient;
-import java.io.File;
-import java.io.FileWriter;
+import io.kubernetes.client.openapi.ApiClient;
 import java.io.IOException;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.contrib.java.lang.system.EnvironmentVariables;
-import org.junit.rules.TemporaryFolder;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
+import uk.org.webcompere.systemstubs.jupiter.SystemStub;
+import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
 /** Tests for the Config helper class */
-public class ConfigTest {
-  @Rule public final EnvironmentVariables environmentVariables = new EnvironmentVariables();
+@ExtendWith(SystemStubsExtension.class)
+class ConfigTest {
+  @TempDir
+  private Path tempDir;
 
-  @Rule public TemporaryFolder folder = new TemporaryFolder();
+  @SystemStub
+  private final EnvironmentVariables variables = new EnvironmentVariables();
 
   @Test
-  public void testDefaultClientNothingPresent() {
-    environmentVariables.set("HOME", "/non-existent");
-    try {
-      ApiClient client = Config.defaultClient();
-      assertEquals("http://localhost:8080", client.getBasePath());
-    } catch (IOException ex) {
-      fail("Unexpected exception: " + ex);
-    }
+  void defaultClientNothingPresent() throws Exception {
+    String path =
+        variables.set("HOME", "/non-existent")
+            .set("HOMEDRIVE", null)
+            .set("USERPROFILE", null)
+            .execute(
+                () -> {
+                  ApiClient client = Config.defaultClient();
+                  return client.getBasePath();
+                });
+    assertThat(path).isEqualTo("http://localhost:8080");
   }
 
   public static String HOME_CONFIG =
@@ -65,66 +73,56 @@ public class ConfigTest {
           + "  name: foo-context\n"
           + "current-context: foo-context\n";
 
-  File config = null;
-  File dir = null;
-  File kubedir = null;
-  File configFile = null;
+  Path config;
+  Path kubedir;
+  Path configFile;
 
-  @Before
-  public void setUp() throws IOException {
-    environmentVariables.set("KUBECONFIG", null);
+  @BeforeEach
+  void setUp() throws IOException {
+    kubedir = Files.createDirectory(tempDir.resolve(".kube"));
+    config = Files.createFile(kubedir.resolve("config"));
+    Files.writeString(config, HOME_CONFIG);
 
-    dir = folder.newFolder();
-    kubedir = new File(dir, ".kube");
-    kubedir.mkdir();
-    config = new File(kubedir, "config");
-    FileWriter writer = new FileWriter(config);
-    writer.write(HOME_CONFIG);
-    writer.flush();
-    writer.close();
-
-    configFile = folder.newFile("config");
-    writer = new FileWriter(configFile);
-    writer.write(KUBECONFIG);
-    writer.flush();
-    writer.close();
+    configFile = Files.createTempFile(tempDir, "config", null);
+    Files.writeString(configFile, KUBECONFIG);
   }
 
   @Test
-  public void testDefaultClientHomeDir() {
-    try {
-      environmentVariables.set("HOME", dir.getCanonicalPath());
-      ApiClient client = Config.defaultClient();
-      assertEquals("http://home.dir.com", client.getBasePath());
-    } catch (Exception ex) {
-      ex.printStackTrace();
-      fail("Unexpected exception: " + ex);
-    }
+  void defaultClientHomeDir() throws Exception {
+    String path =
+        variables.set("HOME", tempDir.toString())
+            .execute(
+                () -> {
+                  ApiClient client = Config.defaultClient();
+                  return client.getBasePath();
+                });
+    assertThat(path).isEqualTo("http://home.dir.com");
   }
 
   @Test
-  public void testDefaultClientKubeConfig() {
-    try {
-      environmentVariables.set("KUBECONFIG", configFile.getCanonicalPath());
-      ApiClient client = Config.defaultClient();
-      assertEquals("http://kubeconfig.dir.com", client.getBasePath());
-    } catch (Exception ex) {
-      ex.printStackTrace();
-      fail("Unexpected exception: " + ex);
-    }
+  void defaultClientKubeConfig() throws Exception {
+    String path =
+        variables.set("KUBECONFIG", configFile.toString())
+            .execute(
+                () -> {
+                  ApiClient client = Config.defaultClient();
+                  return client.getBasePath();
+                });
+    assertThat(path).isEqualTo("http://kubeconfig.dir.com");
   }
 
   @Test
-  public void testDefaultClientPrecedence() {
-    try {
-      environmentVariables.set("HOME", dir.getCanonicalPath());
-      environmentVariables.set("KUBECONFIG", configFile.getCanonicalPath());
-      ApiClient client = Config.defaultClient();
-      // $KUBECONFIG should take precedence over $HOME/.kube/config
-      assertEquals("http://kubeconfig.dir.com", client.getBasePath());
-    } catch (Exception ex) {
-      ex.printStackTrace();
-      fail("Unexpected exception: " + ex);
-    }
+  void defaultClientPrecedence() throws Exception {
+    String path =
+        variables.set("HOME", tempDir.toString())
+            .set("KUBECONFIG", configFile.toString())
+            .execute(
+                () -> {
+                  ApiClient client = Config.defaultClient();
+                  return client.getBasePath();
+                });
+
+    // $KUBECONFIG should take precedence over $HOME/.kube/config
+    assertThat(path).isEqualTo("http://kubeconfig.dir.com");
   }
 }
